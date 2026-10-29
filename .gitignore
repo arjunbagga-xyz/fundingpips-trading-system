@@ -1,0 +1,27 @@
+# Database
+*.db
+*.db.backup*
+*.db.bak*
+
+# Logs and output
+*.log
+*.json
+!package.json
+!tsconfig.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# MT5 credentials (sanitized in code)
+# Keep robust_connection.py but it has login hardcoded
+
+# State and cache
+state/
+run/
+trade_cycles/
+*.closure
+
+# Large binary files
+*.tmp

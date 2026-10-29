@@ -1,0 +1,202 @@
+"""
+Strategy 8: Price Action (Rule-Based)
+Rule-based price action: breakout, rejection, momentum, session, exhaustion, expansion.
+"""
+
+import MetaTrader5 as mt5
+from datetime import datetime
+
+class PriceActionStrategy:
+    """Rule-based price action — opportunity detection from raw price structure."""
+    
+    NAME = "PriceAction"
+    TIMEFRAME = mt5.TIMEFRAME_M15
+    RISK_PCT = 0.005  # 0.5%
+    REWARD_RATIO = 2.0
+    STOP_LOSS_PIPS = 20
+    
+    def __init__(self, connector):
+        self.connector = connector
+        self.symbols = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"]
+    
+    def get_pip_size(self, symbol):
+        info = self.connector.get_symbol_info(symbol)
+        if not info:
+            return 0.0001
+        d = info.digits
+        if d >= 4: return 0.0001
+        elif d == 3: return 0.01
+        elif d == 2: return 0.1
+        else: return 1.0
+    
+    def detect_breakout(self, symbol):
+        """Detect N-day breakout with volume."""
+        rates = self.connector.get_rates(symbol, self.TIMEFRAME, 50)
+        if rates is None or len(rates) < 50:
+            return None
+        
+        current = rates[-1]
+        prev_high = max(r['high'] for r in rates[:-1])
+        prev_low = min(r['low'] for r in rates[:-1])
+        
+        if current['close'] > prev_high:
+            return "BUY"
+        elif current['close'] < prev_low:
+            return "SELL"
+        return None
+    
+    def detect_rejection(self, symbol):
+        """Detect price rejection (long wick at S/R)."""
+        rates = self.connector.get_rates(symbol, self.TIMEFRAME, 20)
+        if rates is None or len(rates) < 20:
+            return None
+        
+        current = rates[-1]
+        body = abs(current['close'] - current['open'])
+        upper_wick = current['high'] - max(current['close'], current['open'])
+        lower_wick = min(current['close'], current['open']) - current['low']
+        
+        # Bullish rejection: long lower wick
+        if lower_wick > body * 2:
+            return "BUY"
+        
+        # Bearish rejection: long upper wick
+        if upper_wick > body * 2:
+            return "SELL"
+        
+        return None
+    
+    def detect_momentum_shift(self, symbol):
+        """Detect momentum shift (RSI divergence)."""
+        rates = self.connector.get_rates(symbol, self.TIMEFRAME, 20)
+        if rates is None or len(rates) < 20:
+            return None
+        
+        closes = [r['close'] for r in rates]
+        
+        # Simple momentum: rate of change
+        roc = (closes[-1] - closes[-5]) / closes[-5] if len(closes) >= 5 else 0
+        
+        if roc > 0.002:
+            return "BUY"
+        elif roc < -0.002:
+            return "SELL"
+        return None
+    
+    def detect_session_open(self, symbol):
+        """Detect session open momentum."""
+        now = datetime.now()
+        hour = now.hour
+        
+        # London open: 08:00, NY open: 13:00
+        if hour == 8 or hour == 13:
+            rates = self.connector.get_rates(symbol, self.TIMEFRAME, 5)
+            if rates is None or len(rates) < 5:
+                return None
+            
+            momentum = (rates[-1]['close'] - rates[0]['open']) / rates[0]['open']
+            
+            if momentum > 0.001:
+                return "BUY"
+            elif momentum < -0.001:
+                return "SELL"
+        
+        return None
+    
+    def detect_trend_exhaustion(self, symbol):
+        """Detect trend exhaustion (parabolic move + divergence)."""
+        rates = self.connector.get_rates(symbol, self.TIMEFRAME, 20)
+        if rates is None or len(rates) < 20:
+            return None
+        
+        closes = [r['close'] for r in rates]
+        
+        # Parabolic move: 5% move in last 5 bars
+        move = (closes[-1] - closes[-6]) / closes[-6] if len(closes) >= 6 else 0
+        
+        if abs(move) > 0.05:
+            # Exhaustion: reverse direction
+            return "SELL" if move > 0 else "BUY"
+        
+        return None
+    
+    def detect_range_expansion(self, symbol):
+        """Detect Bollinger Band squeeze -> expansion."""
+        rates = self.connector.get_rates(symbol, self.TIMEFRAME, 20)
+        if rates is None or len(rates) < 20:
+            return None
+        
+        closes = [r['close'] for r in rates]
+        sma = sum(closes) / len(closes)
+        std = (sum((c - sma)**2 for c in closes) / len(closes)) ** 0.5
+        
+        bandwidth = (2 * std) / sma
+        
+        # Squeeze: bandwidth < 0.5%
+        if bandwidth < 0.005:
+            # Expansion: price breaks out
+            if closes[-1] > sma + std:
+                return "BUY"
+            elif closes[-1] < sma - std:
+                return "SELL"
+        
+        return None
+    
+    def scan(self):
+        """Scan for price action opportunities."""
+        signals = []
+        
+        for symbol in self.symbols:
+            tick = self.connector.get_tick(symbol)
+            if tick is None:
+                continue
+            
+            # Check all price action rules
+            rules = [
+                ("breakout", self.detect_breakout(symbol)),
+                ("rejection", self.detect_rejection(symbol)),
+                ("momentum", self.detect_momentum_shift(symbol)),
+                ("session", self.detect_session_open(symbol)),
+                ("exhaustion", self.detect_trend_exhaustion(symbol)),
+                ("expansion", self.detect_range_expansion(symbol)),
+            ]
+            
+            for rule_name, direction in rules:
+                if direction is None:
+                    continue
+                
+                if direction == "BUY":
+                    entry = tick.ask
+                    sl = entry - self.STOP_LOSS_PIPS * self.get_pip_size(symbol)
+                    tp = entry + self.STOP_LOSS_PIPS * self.get_pip_size(symbol) * self.REWARD_RATIO
+                else:
+                    entry = tick.bid
+                    sl = entry + self.STOP_LOSS_PIPS * self.get_pip_size(symbol)
+                    tp = entry - self.STOP_LOSS_PIPS * self.get_pip_size(symbol) * self.REWARD_RATIO
+                
+                signals.append({
+                    "strategy": self.NAME,
+                    "symbol": symbol,
+                    "direction": direction,
+                    "confidence": 0.6,
+                    "risk_pct": self.RISK_PCT,
+                    "reward_ratio": self.REWARD_RATIO,
+                    "stop_loss_pips": self.STOP_LOSS_PIPS,
+                    "entry": entry,
+                    "stop_loss": sl,
+                    "take_profit": tp,
+                    "reason": f"PriceAction: {rule_name} detected"
+                })
+        
+        return signals
+
+if __name__ == "__main__":
+    from mt5_connector import MT5Connector
+    conn = MT5Connector()
+    if conn.connect():
+        strat = PriceActionStrategy(conn)
+        signals = strat.scan()
+        print(f"Found {len(signals)} PriceAction signals")
+        for s in signals:
+            print(f"  {s['symbol']} {s['direction']} @ {s['entry']:.5f} ({s['reason']})")
+        conn.disconnect()
