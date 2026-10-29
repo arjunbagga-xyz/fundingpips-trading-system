@@ -33,9 +33,11 @@ for _p in [Path("/home/tradingbeast/fundingpips/.env"),
 # (model, provider) — provider "nous" is the default; "openrouter" needs
 # the key from .env. Ordered by measured reliability and latency.
 MODEL_CHAIN = [
-    # NVIDIA NIM — only working model, retried 3x with backoff
+    # NVIDIA NIM — primary (verified 2026-10-29)
     ("nvidia/nemotron-3-ultra-550b-a55b", "nvidia"),
-    ("nvidia/nemotron-3-ultra-550b-a55b", "nvidia"),
+    # NVIDIA NIM — fallback VL model (verified 2026-10-29)
+    ("nvidia/nemotron-3.5-super-vl-120b-a12b", "nvidia"),
+    # Retry primary
     ("nvidia/nemotron-3-ultra-550b-a55b", "nvidia"),
 ]
 
