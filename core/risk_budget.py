@@ -378,26 +378,29 @@ def check_breaches(silo_id):
                               f"> limit ${idea_limit:.2f}",
                 })
 
-    # Zero: min profitable days (7 per rolling 30d)
+    # Zero: min profitable days (7 per rolling 30d) — only applies when account has traded
     retention_days = rules.get("retention_profitable_days")
     if retention_days:
         try:
             conn = get_db()
             c = conn.cursor()
-            c.execute("""SELECT COUNT(DISTINCT date(closed_at))
-                         FROM silo_trades
-                         WHERE silo_id=? AND status='closed'
-                           AND closed_at >= datetime('now', '-30 days')
-                           AND pnl > 0
-                           AND (pnl / ?) >= ?""",
-                      (silo_id, balance, rules.get("retention_min_day_pct", 0.0025)))
-            prof_days = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM silo_trades WHERE silo_id=? AND status='closed'", (silo_id,))
+            total_closed = c.fetchone()[0]
+            if total_closed > 0:
+                c.execute("""SELECT COUNT(DISTINCT date(closed_at))
+                             FROM silo_trades
+                             WHERE silo_id=? AND status='closed'
+                               AND closed_at >= datetime('now', '-30 days')
+                               AND pnl > 0
+                               AND (pnl / ?) >= ?""",
+                          (silo_id, balance, rules.get("retention_min_day_pct", 0.0025)))
+                prof_days = c.fetchone()[0]
+                if prof_days < retention_days:
+                    breaches.append({
+                        "type": "min_profitable_days",
+                        "detail": f"{prof_days} profitable days < {retention_days} required",
+                    })
             conn.close()
-            if prof_days < retention_days:
-                breaches.append({
-                    "type": "min_profitable_days",
-                    "detail": f"{prof_days} profitable days < {retention_days} required",
-                })
         except Exception:
             pass
 
