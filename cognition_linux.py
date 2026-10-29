@@ -33,12 +33,10 @@ for _p in [Path("/home/tradingbeast/fundingpips/.env"),
 # (model, provider) — provider "nous" is the default; "openrouter" needs
 # the key from .env. Ordered by measured reliability and latency.
 MODEL_CHAIN = [
-    # NVIDIA NIM — working (verified 2026-10-29)
+    # NVIDIA NIM — only working model, retried 3x with backoff
     ("nvidia/nemotron-3-ultra-550b-a55b", "nvidia"),
-    # OpenRouter tier
-    ("meta-llama/llama-3.3-70b-instruct:free", "openrouter"),
-    ("google/gemma-3-27b-it:free", "openrouter"),
-    ("qwen/qwen3-32b:free", "openrouter"),
+    ("nvidia/nemotron-3-ultra-550b-a55b", "nvidia"),
+    ("nvidia/nemotron-3-ultra-550b-a55b", "nvidia"),
 ]
 
 # Markers the hermes CLI prints into stdout when a call actually failed.
@@ -401,7 +399,7 @@ import tempfile
 QUERY_FILE_THRESHOLD = 20000
 
 
-def call_hermes(prompt, timeout=120):
+def call_hermes(prompt, timeout=300):
     """Call hermes CLI with model fallback chain.
 
     Tries each model in MODEL_CHAIN in order. If a model returns a 429
@@ -423,11 +421,10 @@ def call_hermes(prompt, timeout=120):
         model, provider = entry if isinstance(entry, tuple) else (entry, "nous")
         try:
             if use_file:
-                # --query-file belongs to `chat`, not to the top-level CLI
                 cmd = [HERMES_CLI, "chat", "--query-file", tmp.name,
-                       "--model", model]
+                       "-m", model, "--oneshot", "-Q"]
             else:
-                cmd = [HERMES_CLI, "-z", prompt, "chat", "--model", model]
+                cmd = [HERMES_CLI, "-z", prompt, "-m", model]
             if provider != "nous":
                 cmd += ["--provider", provider]
             result = subprocess.run(
@@ -439,7 +436,8 @@ def call_hermes(prompt, timeout=120):
             output = (result.stdout or "") + (result.stderr or "")
             # Rate limit -> try the next model.
             if "429" in output or "rate limit" in output.lower():
-                print(f"  Model {model} rate-limited, trying next...")
+                print(f"  Model {model} rate-limited, retrying in 15s...")
+                time.sleep(15)
                 continue
 
             # Judge by CONTENT, not exit code: hermes chat returns rc=1 on a
@@ -450,11 +448,8 @@ def call_hermes(prompt, timeout=120):
             low = stdout.lower()
             if any(m.lower() in low for m in FAILURE_MARKERS):
                 hit = next(m for m in FAILURE_MARKERS if m.lower() in low)
-                print(f"  Model {model} failed: {hit}")
-                # Rate limits are transient — back off before the next model
-                # so we do not immediately hit the same wall.
-                if "429" in low or "rate limit" in low or "fair-share" in low:
-                    time.sleep(8)
+                print(f"  Model {model} failed: {hit}, retrying in 15s...")
+                time.sleep(15)
                 continue
             if len(stdout) > 50:
                 # Strip the CLI's echoed prompt if it prefixes the answer.
@@ -478,7 +473,8 @@ def call_hermes(prompt, timeout=120):
                 return f"ERROR: {result.stderr.strip()}"
             return "ERROR: empty response"
         except subprocess.TimeoutExpired:
-            print(f"  Model {model} timed out, trying next...")
+            print(f"  Model {model} timed out, retrying in 15s...")
+            time.sleep(15)
             continue
         except Exception as e:
             print(f"  Model {model} error: {e}, trying next...")
