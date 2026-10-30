@@ -395,7 +395,26 @@ class SiloRuleEngine:
         return True
 
     def _filter_signals(self, silo, all_signals):
-        return []
+        silo_id = silo["silo_id"]
+        filtered = []
+        for signal in all_signals:
+            symbol = signal.get("symbol")
+            direction = signal.get("direction")
+            entry = signal.get("entry")
+            sl = signal.get("stop_loss")
+            tp = signal.get("take_profit")
+            risk_pct = signal.get("risk_pct", 0.005)
+            strategy = signal.get("strategy", "unknown")
+            if not all([symbol, direction, entry, sl]):
+                continue
+            result = check_risk_budget(silo_id, symbol, direction, risk_pct, entry, sl, tp or entry, strategy)
+            if result.allowed:
+                signal["clamped_risk"] = result.clamped_risk
+                signal["idea_id"] = result.idea_id
+                filtered.append(signal)
+            else:
+                print(f"  FILTERED {silo_id} {symbol} {direction}: {result.reason}")
+        return filtered
 
     def _process_silo(self, silo, all_signals):
         silo_id = silo["silo_id"]
