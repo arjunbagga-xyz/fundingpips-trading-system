@@ -26,7 +26,7 @@ for env_path in [
 from core.silos import SILOS, get_rules
 from core.silo_db import (
     init_silo_schema, create_silo, get_silo_row, get_all_silos,
-    update_silo, reset_silo, get_open_silo_trades, get_silo_trades_today,
+    update_silo, reset_silo, get_open_silo_trades, get_silo_trades_today, refresh_open_floating,
     record_silo_trade, snapshot_silo, get_strategy_weights, save_strategy_weights,
     get_symbol_weights, platform_date, get_db, close_silo_trade,
     apply_pending_strategy_params,
@@ -334,6 +334,11 @@ class SiloRuleEngine:
         magic = silo["magic_number"]
         all_positions = self.mt5.positions_get() or []
         positions = [p for p in all_positions if p.magic == magic]
+        # Write live floating P&L to DB so cognition/risk see current exposure
+        try:
+            refresh_open_floating(silo_id, positions)
+        except Exception as e:
+            print(f"  Warning: refresh_open_floating failed: {e}")
         open_tickets_mt5 = {p.ticket for p in positions}
         # Sync closed trades: DB says open but MT5 doesn't have them
         conn = get_db()
