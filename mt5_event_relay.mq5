@@ -121,7 +121,7 @@ void OnTrade()
     json += "}\n";
 
     // Send
-    char data[];
+    uchar data[];
     int len = StringToCharArray(json, data, 0, -1, CP_UTF8);
     int sent = SocketSend(socket_handle, data, len - 1);
     if (sent <= 0)
