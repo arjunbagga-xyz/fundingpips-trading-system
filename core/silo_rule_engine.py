@@ -505,7 +505,7 @@ class SiloRuleEngine:
             "sl": signal["stop_loss"],
             "tp": signal["take_profit"],
             "comment": f"{silo_id}:{signal['strategy']}",
-            "type_filling": self.mt5.ORDER_FILLING_IOC,
+            "type_filling": self.mt5.ORDER_FILLING_FOK,
         })
         if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
             ticket = result.order
