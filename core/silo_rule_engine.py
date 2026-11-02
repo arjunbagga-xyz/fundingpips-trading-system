@@ -28,7 +28,7 @@ from core.silo_db import (
     init_silo_schema, create_silo, get_silo_row, get_all_silos,
     update_silo, reset_silo, get_open_silo_trades, get_silo_trades_today,
     record_silo_trade, snapshot_silo, get_strategy_weights, save_strategy_weights,
-    get_symbol_weights, platform_date, get_db,
+    get_symbol_weights, platform_date, get_db, close_silo_trade,
     apply_pending_strategy_params,
 )
 from core.risk_budget import check_risk_budget, check_breaches, advance_phase, get_blockers, register_trade
@@ -139,6 +139,52 @@ class SiloRuleEngine:
         conn.close()
         return True
 
+    def _capture_market_data(self):
+        """Capture H1 bars + current tick for each active symbol into the
+        market_data table — the sole source of price action for the cognition
+        engine. Without this, market_data={} and ORB fires blind (sole blocker).
+        """
+        from core.silo_db import save_market_data
+        from datetime import datetime, timezone
+        count = 100
+        symbols = getattr(self, "active_symbols", []) or []
+        if not symbols:
+            print("  market data capture: no active symbols")
+            return
+        for sym in symbols:
+            try:
+                rates = self.mt5.copy_rates_from_pos(sym, self.mt5.TIMEFRAME_H1, 0, count)
+                if rates is None or len(rates) == 0:
+                    print(f"  no H1 rates for {sym}")
+                    continue
+                for r in rates:
+                    t = int(r["time"]) if isinstance(r, dict) else int(r.time)
+                    save_market_data(
+                        timestamp=datetime.fromtimestamp(t, tz=timezone.utc).isoformat(),
+                        symbol=sym,
+                        timeframe="H1",
+                        open=float(r["open"] if isinstance(r, dict) else r.open),
+                        high=float(r["high"] if isinstance(r, dict) else r.high),
+                        low=float(r["low"] if isinstance(r, dict) else r.low),
+                        close=float(r["close"] if isinstance(r, dict) else r.close),
+                        volume=float(
+                            r["tick_volume"] if isinstance(r, dict) else r.tick_volume
+                        )
+                        if (r["tick_volume"] if isinstance(r, dict) else r.tick_volume)
+                        else 0.0,
+                    )
+                tick = self.mt5.symbol_info_tick(sym)
+                if tick is not None:
+                    save_market_data(
+                        timestamp=datetime.now(tz=timezone.utc).isoformat(),
+                        symbol=sym,
+                        timeframe="TICK",
+                        bid=float(tick.bid),
+                        ask=float(tick.ask),
+                    )
+            except Exception as e:
+                print(f"  market data capture error for {sym}: {e}")
+
     def run(self):
         print(f"\n{'='*60}")
         print(f"SILO RULE ENGINE — {datetime.now().isoformat()}")
@@ -170,6 +216,14 @@ class SiloRuleEngine:
         for sym in tradeable:
             self.mt5.symbol_select(sym, True)
         time.sleep(2)
+
+        # Capture H1 bars + current tick for each active symbol into the
+        # market_data table so the cognition engine can scan price action.
+        # Without this, market_data={} and ORB fires blind (sole blocker).
+        try:
+            self._capture_market_data()
+        except Exception as e:
+            print(f"  market data capture error: {e}")
 
         self.regime_ctx = {}
         try:
@@ -230,8 +284,24 @@ class SiloRuleEngine:
         magic = silo["magic_number"]
         all_positions = self.mt5.positions_get() or []
         positions = [p for p in all_positions if p.magic == magic]
+        open_tickets_mt5 = {p.ticket for p in positions}
+        # Sync closed trades: DB says open but MT5 doesn't have them
         conn = get_db()
         c = conn.cursor()
+        c.execute("SELECT ticket FROM silo_trades WHERE silo_id = ? AND status = 'open'", (silo_id,))
+        db_open_tickets = [r[0] for r in c.fetchall()]
+        for db_ticket in db_open_tickets:
+            if db_ticket not in open_tickets_mt5:
+                # Trade was closed by MT5 (SL/TP hit) — fetch P&L from history
+                pnl = None
+                try:
+                    deals = self.mt5.history_deals_get(position=db_ticket)
+                    if deals:
+                        pnl = sum(d.profit for d in deals)
+                except Exception:
+                    pass
+                close_silo_trade(silo_id, db_ticket, pnl)
+                print(f"  SYNC-CLOSED {silo_id} ticket {db_ticket}: pnl={pnl}")
         c.execute("SELECT COALESCE(SUM(pnl), 0) FROM silo_trades WHERE silo_id = ? AND status = 'closed'", (silo_id,))
         closed_pnl = c.fetchone()[0]
         conn.close()
@@ -277,7 +347,12 @@ class SiloRuleEngine:
             ticket = pl.get("ticket")
             if ticket:
                 try:
-                    self.mt5.order_send({"action": self.mt5.TRADE_ACTION_DEAL, "position": ticket, "volume": 0, "type": self.mt5.ORDER_TYPE_CLOSE, "magic": silo["magic_number"]})
+                    pos = self.mt5.positions_get(ticket=ticket)
+                    if pos:
+                        p = pos[0]
+                        close_type = self.mt5.ORDER_TYPE_SELL if p.type == 0 else self.mt5.ORDER_TYPE_BUY
+                        close_price = self.mt5.symbol_info_tick(p.symbol).bid if p.type == 0 else self.mt5.symbol_info_tick(p.symbol).ask
+                        self.mt5.order_send({"action": self.mt5.TRADE_ACTION_DEAL, "symbol": p.symbol, "volume": p.volume, "type": close_type, "price": close_price, "position": ticket, "magic": silo["magic_number"]})
                     c.execute("UPDATE trigger_queue SET status='done' WHERE id=?", (row["id"],))
                 except Exception as e:
                     print(f"  CLOSE FAILED {silo_id}: {e}")
@@ -336,12 +411,40 @@ class SiloRuleEngine:
         risk_amount = signal.get("clamped_risk", 0)
         if risk_amount <= 0:
             return
-        volume = 0.01
+        # Validate SL/TP exist
+        sl = signal.get("stop_loss")
+        tp = signal.get("take_profit")
+        if not sl or not tp:
+            print(f"  SKIP {silo_id}: no SL/TP for {signal['symbol']}")
+            return
+        # Check for existing open position on same symbol+direction (dedup)
+        open_trades = get_open_silo_trades(silo_id)
+        for ot in open_trades:
+            if ot.get("symbol") == signal["symbol"] and ot.get("direction") == signal["direction"]:
+                print(f"  SKIP {silo_id}: already open {signal['symbol']} {signal['direction']}")
+                return
+        # Calculate volume from clamped_risk instead of hardcoding 0.01
         tick = self.mt5.symbol_info_tick(signal["symbol"])
         if tick is not None:
             price = tick.ask if signal["direction"] == "BUY" else tick.bid
         else:
             price = signal["entry"]
+        # Risk per lot = |entry - sl| * contract_size * (1 pip / pip_size)
+        # Simplified: use 0.01 lot minimum, scale up based on risk
+        point = self.mt5.symbol_info(signal["symbol"]).point if self.mt5.symbol_info(signal["symbol"]) else 0.0001
+        sl_distance = abs(price - sl)
+        if sl_distance <= 0:
+            print(f"  SKIP {silo_id}: zero SL distance for {signal['symbol']}")
+            return
+        # Estimate lot size: risk_amount / (sl_distance / point * point_value)
+        # For FX, 1 lot = 100,000 units; pip value ~ $10 per lot for most pairs
+        # Conservative: use 0.01 lot minimum, max 0.1 lot to avoid over-leveraging
+        pip_value_per_lot = 10.0  # approximate for FX pairs
+        pips_at_risk = sl_distance / point
+        lots = risk_amount / (pips_at_risk * pip_value_per_lot) if pips_at_risk > 0 else 0.01
+        lots = max(0.01, min(lots, 0.1))  # clamp between 0.01 and 0.1
+        lots = round(lots, 2)
+        volume = lots
         result = self.mt5.order_send({
             "action": self.mt5.TRADE_ACTION_DEAL,
             "symbol": signal["symbol"],
@@ -352,11 +455,19 @@ class SiloRuleEngine:
             "sl": signal["stop_loss"],
             "tp": signal["take_profit"],
             "comment": f"{silo_id}:{signal['strategy']}",
-            "type_filling": self.mt5.ORDER_FILLING_FOK,
+            "type_filling": self.mt5.ORDER_FILLING_IOC,
         })
         if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
             ticket = result.order
-            record_silo_trade(silo_id, ticket, signal.get("idea_id"), signal["strategy"], signal["symbol"], signal["direction"], volume, signal["entry"], signal["stop_loss"], signal["take_profit"], risk_amount, source="rule")
+            try:
+                record_silo_trade(silo_id, ticket, signal.get("idea_id"), signal["strategy"], signal["symbol"], signal["direction"], volume, signal["entry"], signal["stop_loss"], signal["take_profit"], risk_amount, source="rule")
+            except Exception as e:
+                print(f"  WARNING: record_silo_trade failed for {ticket}: {e}")
+                # Still record in results — trade is in MT5
+            try:
+                register_trade(silo_id, signal.get("idea_id"), risk_amount, symbol=signal["symbol"], direction=signal["direction"])
+            except Exception as e:
+                print(f"  WARNING: register_trade failed: {e}")
             self.results.append({"action": "trade", "silo_id": silo_id, "ticket": ticket, "symbol": signal["symbol"], "direction": signal["direction"]})
         else:
             retcode = result.retcode if result else "None"
