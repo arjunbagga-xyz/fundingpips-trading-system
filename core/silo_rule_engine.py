@@ -57,7 +57,7 @@ SYMBOLS = [
 ]
 MAX_LOTS_PER_TRADE = 20
 EA_RELAY_PORT = 9876
-EA_RELAY_FLAG_FILE = "/home/tradingbeast/.mt5/drive_c/Program Files/MetaTrader 5/MQL5/Files/ea_relay_enabled.flag"
+EA_RELAY_FLAG_FILE = "/home/tradingbeast/.mt5/drive_c/users/tradingbeast/AppData/Roaming/MetaQuotes/Terminal/D0E8209F77C8CF37AD8BF550E51FF075/MQL5/Files/ea_relay_enabled.flag"
 EA_LISTENER_SCRIPT = "/home/tradingbeast/fundingpips/framework/mt5_event_listener.py"
 CRYPTO_SYMBOLS = {"BTCUSD", "ETHUSD"}
 
@@ -191,9 +191,14 @@ class SiloRuleEngine:
     @staticmethod
     def enable_ea_relay():
         """Enable the EA event relay by creating the flag file."""
+        paths = [EA_RELAY_FLAG_FILE,
+                 "/home/tradingbeast/.mt5/drive_c/Program Files/MetaTrader 5/MQL5/Files/ea_relay_enabled.flag"]
         try:
-            with open(EA_RELAY_FLAG_FILE, "w") as f:
-                f.write("enabled")
+            for p in paths:
+                import os
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                with open(p, "w") as f:
+                    f.write("enabled")
             print("  EA relay ENABLED")
             return True
         except Exception as e:
@@ -203,9 +208,12 @@ class SiloRuleEngine:
     @staticmethod
     def disable_ea_relay():
         """Disable the EA event relay by removing the flag file."""
+        paths = [EA_RELAY_FLAG_FILE,
+                 "/home/tradingbeast/.mt5/drive_c/Program Files/MetaTrader 5/MQL5/Files/ea_relay_enabled.flag"]
         try:
-            if os.path.exists(EA_RELAY_FLAG_FILE):
-                os.remove(EA_RELAY_FLAG_FILE)
+            for p in paths:
+                if os.path.exists(p):
+                    os.remove(p)
             print("  EA relay DISABLED")
             return True
         except Exception as e:
