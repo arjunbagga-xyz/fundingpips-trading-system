@@ -6,6 +6,8 @@ export DISPLAY=:99
 WINE_PY="/home/tradingbeast/.mt5/drive_c/users/tradingbeast/AppData/Local/Programs/Python/Python311/python.exe"
 FRAMEWORK_DIR="/home/tradingbeast/fundingpips/framework"
 LOG="/home/tradingbeast/fundingpips/logs/silo_engine.log"
+LISTENER_LOG="/home/tradingbeast/fundingpips/logs/mt5_listener.log"
+LISTENER_PID="/home/tradingbeast/fundingpips/mt5_listener.pid"
 
 cd "$FRAMEWORK_DIR" || exit 1
 
@@ -23,6 +25,16 @@ if ! pgrep -f 'terminal64.exe' > /dev/null; then
     sleep 45
 else
     echo "[$(date)] MT5 already running — reusing session" >> "$LOG"
+fi
+
+# Ensure MT5 event listener is running (Linux Python, not Wine)
+if ! pgrep -f 'mt5_event_listener.py' > /dev/null; then
+    echo "[$(date)] Starting MT5 event listener..." >> "$LOG"
+    nohup python3 "$FRAMEWORK_DIR/mt5_event_listener.py" >> "$LISTENER_LOG" 2>&1 &
+    echo $! > "$LISTENER_PID"
+    sleep 1
+else
+    echo "[$(date)] MT5 event listener already running" >> "$LOG"
 fi
 
 # Run silo rule engine with connection retry

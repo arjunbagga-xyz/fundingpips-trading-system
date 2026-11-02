@@ -56,6 +56,9 @@ SYMBOLS = [
     "BTCUSD", "ETHUSD",
 ]
 MAX_LOTS_PER_TRADE = 20
+EA_RELAY_PORT = 9876
+EA_RELAY_FLAG_FILE = "/home/tradingbeast/.mt5/drive_c/Program Files/MetaTrader 5/MQL5/Files/ea_relay_enabled.flag"
+EA_LISTENER_SCRIPT = "/home/tradingbeast/fundingpips/framework/mt5_event_listener.py"
 CRYPTO_SYMBOLS = {"BTCUSD", "ETHUSD"}
 
 PILLAR_MEMBERS = {
@@ -185,6 +188,30 @@ class SiloRuleEngine:
             except Exception as e:
                 print(f"  market data capture error for {sym}: {e}")
 
+    @staticmethod
+    def enable_ea_relay():
+        """Enable the EA event relay by creating the flag file."""
+        try:
+            with open(EA_RELAY_FLAG_FILE, "w") as f:
+                f.write("enabled")
+            print("  EA relay ENABLED")
+            return True
+        except Exception as e:
+            print(f"  Failed to enable EA relay: {e}")
+            return False
+
+    @staticmethod
+    def disable_ea_relay():
+        """Disable the EA event relay by removing the flag file."""
+        try:
+            if os.path.exists(EA_RELAY_FLAG_FILE):
+                os.remove(EA_RELAY_FLAG_FILE)
+            print("  EA relay DISABLED")
+            return True
+        except Exception as e:
+            print(f"  Failed to disable EA relay: {e}")
+            return False
+
     def run(self):
         print(f"\n{'='*60}")
         print(f"SILO RULE ENGINE — {datetime.now().isoformat()}")
@@ -244,6 +271,12 @@ class SiloRuleEngine:
             sid = silo["silo_id"]
             self.strategy_weights[sid] = get_strategy_weights(sid)
             self.symbol_weights[sid] = get_symbol_weights(sid)
+
+        # Ensure MT5 event listener is running
+        try:
+            self._ensure_listener()
+        except Exception as e:
+            print(f"  Listener error: {e}")
 
         # Reconcile MT5 positions with DB on startup
         try:
@@ -328,6 +361,21 @@ class SiloRuleEngine:
                     except Exception as e:
                         print(f"  RECONCILE: failed to record {p.ticket}: {e}")
         conn.close()
+
+    def _ensure_listener(self):
+        """Check if the MT5 event listener is running (started by cron script)."""
+        import socket
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1)
+            result = s.connect_ex(("127.0.0.1", EA_RELAY_PORT))
+            s.close()
+            if result == 0:
+                return True
+        except Exception:
+            pass
+        print("  Warning: MT5 event listener not running (cron should start it)")
+        return False
 
     def _sync_silo(self, silo):
         silo_id = silo["silo_id"]
