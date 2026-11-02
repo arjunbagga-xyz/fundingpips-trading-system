@@ -158,17 +158,17 @@ class SiloRuleEngine:
                     print(f"  no H1 rates for {sym}")
                     continue
                 for r in rates:
-                    t = int(r["time"]) if isinstance(r, dict) else int(r.time)
+                    t = int(r["time"]) if hasattr(r, "__getitem__") else int(r.time)
                     save_market_data(
                         timestamp=datetime.fromtimestamp(t, tz=timezone.utc).isoformat(),
                         symbol=sym,
                         timeframe="H1",
-                        open=float(r["open"] if isinstance(r, dict) else r.open),
-                        high=float(r["high"] if isinstance(r, dict) else r.high),
-                        low=float(r["low"] if isinstance(r, dict) else r.low),
-                        close=float(r["close"] if isinstance(r, dict) else r.close),
+                        open=float(r["open"] if hasattr(r, "__getitem__") else r.open),
+                        high=float(r["high"] if hasattr(r, "__getitem__") else r.high),
+                        low=float(r["low"] if hasattr(r, "__getitem__") else r.low),
+                        close=float(r["close"] if hasattr(r, "__getitem__") else r.close),
                         volume=float(
-                            r["tick_volume"] if isinstance(r, dict) else r.tick_volume
+                            r["tick_volume"] if hasattr(r, "__getitem__") else r.tick_volume
                         )
                         if (r["tick_volume"] if isinstance(r, dict) else r.tick_volume)
                         else 0.0,
@@ -245,6 +245,12 @@ class SiloRuleEngine:
             self.strategy_weights[sid] = get_strategy_weights(sid)
             self.symbol_weights[sid] = get_symbol_weights(sid)
 
+        # Reconcile MT5 positions with DB on startup
+        try:
+            self._reconcile_mt5_db()
+        except Exception as e:
+            print(f"  Reconciliation error: {e}")
+
         # Process queued actions from LLM
         self._process_close_queue()
         self._process_discretionary_queue()
@@ -278,6 +284,50 @@ class SiloRuleEngine:
 
         print(f"\nRule engine complete. {len(self.results)} actions taken.")
         return self.results
+
+    def _reconcile_mt5_db(self):
+        """Startup reconciliation: sync MT5 positions with DB.
+        
+        - MT5 has position but DB doesn't → record it
+        - DB says open but MT5 doesn't → mark as closed (fetch P&L from history)
+        """
+        all_positions = self.mt5.positions_get() or []
+        mt5_tickets = {p.ticket for p in all_positions}
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT silo_id, ticket, status FROM silo_trades")
+        db_rows = c.fetchall()
+        db_open_tickets = {r[1] for r in db_rows if r[2] == "open"}
+        # DB open but not in MT5 → closed by SL/TP
+        for silo_id, ticket, status in db_rows:
+            if status == "open" and ticket not in mt5_tickets:
+                pnl = None
+                try:
+                    deals = self.mt5.history_deals_get(position=ticket)
+                    if deals:
+                        pnl = sum(d.profit for d in deals)
+                except Exception:
+                    pass
+                close_silo_trade(silo_id, ticket, pnl)
+                print(f"  RECONCILE: closed {silo_id} ticket {ticket} (SL/TP hit, pnl={pnl})")
+        # MT5 has position but DB doesn't → record it
+        for p in all_positions:
+            c.execute("SELECT COUNT(*) FROM silo_trades WHERE ticket = ?", (p.ticket,))
+            if c.fetchone()[0] == 0:
+                silo_id = None
+                # Find which silo owns this position by magic number
+                for s in get_all_silos():
+                    if s["magic_number"] == p.magic:
+                        silo_id = s["silo_id"]
+                        break
+                if silo_id:
+                    direction = "BUY" if p.type == 0 else "SELL"
+                    try:
+                        record_silo_trade(silo_id, p.ticket, None, "reconciled", p.symbol, direction, p.volume, p.price_open, p.sl or 0, p.tp or 0, 0, source="reconcile")
+                        print(f"  RECONCILE: recorded {silo_id} ticket {p.ticket} ({p.symbol} {direction})")
+                    except Exception as e:
+                        print(f"  RECONCILE: failed to record {p.ticket}: {e}")
+        conn.close()
 
     def _sync_silo(self, silo):
         silo_id = silo["silo_id"]
