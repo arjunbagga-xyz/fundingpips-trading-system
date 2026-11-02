@@ -31,6 +31,9 @@ MAGIC_TO_SILO = {s["magic_number"]: s["silo_id"] for s in SILOS}
 _processed_deals = set()
 _lock = threading.Lock()
 
+import sys
+sys.stdout.reconfigure(line_buffering=True)
+
 DB_PATH = None
 
 
