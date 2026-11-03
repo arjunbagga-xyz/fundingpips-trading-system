@@ -70,6 +70,7 @@ def handle_event(event):
     # Only process our silo's trades
     silo_id = MAGIC_TO_SILO.get(magic)
     if not silo_id:
+        print(f"[LISTENER] SKIPPED deal={deal_ticket} magic={magic} (not our silo)")
         return
 
     direction = "BUY" if deal_type == 0 else "SELL"
